@@ -7,10 +7,21 @@ from .stabilizer import VibrationStabilizer
 
 
 def apply_rotation(frame, degrees):
-    if degrees % 360 == 0:
+    normalized = degrees % 360
+    if normalized == 0:
         return frame
+    # A cardinal turn swaps width/height, so it needs cv2.rotate to keep the
+    # full frame; warping it onto the original (unswapped) canvas instead
+    # would crop out most of a non-square image. Only in-between angles (for
+    # leveling the view) fall back to an in-place warp around the center.
+    if normalized == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if normalized == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    if normalized == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
     height, width = frame.shape[:2]
-    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), degrees, 1.0)
+    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), normalized, 1.0)
     return cv2.warpAffine(frame, matrix, (width, height), borderMode=cv2.BORDER_REPLICATE)
 
 
@@ -75,7 +86,7 @@ class CameraWorker(QThread):
     error = pyqtSignal(str)
     snapshot_saved = pyqtSignal(str)
     recording_started = pyqtSignal(str)
-    recording_stopped = pyqtSignal(str)
+    recording_stopped = pyqtSignal(str, bool)
 
     def __init__(self, device_path, parent=None):
         super().__init__(parent)
@@ -185,7 +196,11 @@ class CameraWorker(QThread):
                 path, self._record_path = self._record_path, None
                 if failed and not self._recording_failure_reported:
                     self.error.emit(f"Recording encoder failed — {path} may be incomplete")
-                self.recording_stopped.emit(path or "")
+                # Carry the failure in the signal itself, not a worker
+                # attribute read back later: stopping the stream can null
+                # out the UI's reference to this worker before a queued
+                # cross-thread signal is actually delivered and handled.
+                self.recording_stopped.emit(path or "", failed)
 
     def _handle_pending_snapshot(self, frame):
         if self._pending_snapshot_path is None:

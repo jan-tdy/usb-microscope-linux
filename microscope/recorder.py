@@ -62,7 +62,14 @@ class FfmpegRecorder:
             except OSError:
                 pass
         try:
-            self._process.wait(timeout=5)
+            # -movflags +faststart makes ffmpeg do a second pass over the
+            # whole file to move its index to the front, which "can take a
+            # while" on a large recording (per ffmpeg's own docs) — killing
+            # it too early leaves a truncated, unplayable file, exactly what
+            # this recorder exists to avoid. 30s comfortably covers a
+            # typical multi-minute microscope clip without hanging forever
+            # on a truly stuck process.
+            self._process.wait(timeout=30)
         except subprocess.TimeoutExpired:
             self._process.kill()
             self._process.wait()

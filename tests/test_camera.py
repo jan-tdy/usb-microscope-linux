@@ -37,3 +37,34 @@ def test_output_shape_matches_input():
     frame = _square_pattern()
     rotated = apply_rotation(frame, 37)
     assert rotated.shape == frame.shape
+
+
+def _rectangular_pattern():
+    frame = np.zeros((100, 200, 3), dtype=np.uint8)  # height=100, width=200
+    frame[40:60, 20:40] = (255, 255, 255)
+    return frame
+
+
+def test_90_degrees_swaps_dimensions_without_cropping_content():
+    frame = _rectangular_pattern()
+    bright_pixels = int((frame > 0).sum())
+
+    rotated = apply_rotation(frame, 90)
+
+    assert rotated.shape == (200, 100, 3)
+    assert int((rotated > 0).sum()) == bright_pixels
+
+
+def test_270_degrees_swaps_dimensions_without_cropping_content():
+    frame = _rectangular_pattern()
+    bright_pixels = int((frame > 0).sum())
+
+    rotated = apply_rotation(frame, 270)
+
+    assert rotated.shape == (200, 100, 3)
+    assert int((rotated > 0).sum()) == bright_pixels
+
+
+def test_630_degrees_normalizes_to_270():
+    frame = _rectangular_pattern()
+    assert np.array_equal(apply_rotation(frame, 630), apply_rotation(frame, 270))

@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         self._pending_point = None
         self._measurements = []
         self._calibration = None
+        self._loading_settings = False
         self._build_ui()
         self._refresh_devices()
         self._load_settings()
@@ -109,10 +110,12 @@ class MainWindow(QMainWindow):
         rotation_layout.addWidget(self.rotation_slider)
         rotation_layout.addWidget(self.rotation_value_label)
         snap_row = QHBoxLayout()
+        self.rotation_snap_buttons = []
         for angle in (0, 90, 180, 270):
             snap_button = QPushButton(f"{angle}°")
             snap_button.clicked.connect(lambda _checked, a=angle: self._snap_rotation(a))
             snap_row.addWidget(snap_button)
+            self.rotation_snap_buttons.append(snap_button)
         rotation_layout.addLayout(snap_row)
         side.addWidget(rotation_box)
 
@@ -260,10 +263,13 @@ class MainWindow(QMainWindow):
             self.worker.request_recording_stop()
         self.worker.stop()
         # Finalizing an ffmpeg-backed recording (closing its moov atom) can
-        # take a bit longer than plain capture teardown, so give it more room.
-        self.worker.wait(8000 if was_recording else 2000)
+        # take a while on a large file — give it as much room as the
+        # recorder itself allows before giving up (see recorder.py), plus a
+        # margin for the rest of the thread's own teardown.
+        self.worker.wait(35000 if was_recording else 2000)
         self.worker = None
         self._recording = False
+        self._set_rotation_controls_enabled(True)
         self.record_button.setText("Start Recording")
         self.stream_button.setText("Start Stream")
         self.device_combo.setEnabled(True)
@@ -464,43 +470,58 @@ class MainWindow(QMainWindow):
         if not data:
             return
 
-        zoom_value = data.get("zoom_slider_value")
-        if isinstance(zoom_value, int) and self.zoom_slider.minimum() <= zoom_value <= self.zoom_slider.maximum():
-            self.zoom_slider.setValue(zoom_value)
+        # setChecked()/setCurrentText() below fire the same toggled/changed
+        # signals a real user action would, which call _save_settings() —
+        # and since this method hasn't restored save_dir/calibration/device
+        # yet at that point, that premature save would overwrite them on
+        # disk with their still-default values. Suppress saving until the
+        # whole restore is done.
+        self._loading_settings = True
+        try:
+            zoom_value = data.get("zoom_slider_value")
+            if (
+                isinstance(zoom_value, int)
+                and self.zoom_slider.minimum() <= zoom_value <= self.zoom_slider.maximum()
+            ):
+                self.zoom_slider.setValue(zoom_value)
 
-        rotation_value = data.get("rotation")
-        if isinstance(rotation_value, int) and 0 <= rotation_value <= 359:
-            self.rotation_slider.setValue(rotation_value)
+            rotation_value = data.get("rotation")
+            if isinstance(rotation_value, int) and 0 <= rotation_value <= 359:
+                self.rotation_slider.setValue(rotation_value)
 
-        self.grid_check.setChecked(bool(data.get("show_grid", False)))
-        self.crosshair_check.setChecked(bool(data.get("show_crosshair", False)))
-        self.stabilize_check.setChecked(bool(data.get("stabilize", False)))
+            self.grid_check.setChecked(bool(data.get("show_grid", False)))
+            self.crosshair_check.setChecked(bool(data.get("show_crosshair", False)))
+            self.stabilize_check.setChecked(bool(data.get("stabilize", False)))
 
-        unit = data.get("unit")
-        if unit in MEASUREMENT_UNITS:
-            self.unit_combo.setCurrentText(unit)
+            unit = data.get("unit")
+            if unit in MEASUREMENT_UNITS:
+                self.unit_combo.setCurrentText(unit)
 
-        save_dir = data.get("save_dir")
-        if isinstance(save_dir, str) and save_dir:
-            self._save_dir = save_dir
-            self.save_dir_label.setText(save_dir)
+            save_dir = data.get("save_dir")
+            if isinstance(save_dir, str) and save_dir:
+                self._save_dir = save_dir
+                self.save_dir_label.setText(save_dir)
 
-        calibration = data.get("calibration")
-        if (
-            isinstance(calibration, dict)
-            and isinstance(calibration.get("pixels_per_unit"), (int, float))
-            and calibration.get("unit") in MEASUREMENT_UNITS
-        ):
-            self._calibration = calibration
-            self._update_calibration_label()
+            calibration = data.get("calibration")
+            if (
+                isinstance(calibration, dict)
+                and isinstance(calibration.get("pixels_per_unit"), (int, float))
+                and calibration.get("unit") in MEASUREMENT_UNITS
+            ):
+                self._calibration = calibration
+                self._update_calibration_label()
 
-        device_path = data.get("device_path")
-        if isinstance(device_path, str):
-            index = self.device_combo.findData(device_path)
-            if index >= 0:
-                self.device_combo.setCurrentIndex(index)
+            device_path = data.get("device_path")
+            if isinstance(device_path, str):
+                index = self.device_combo.findData(device_path)
+                if index >= 0:
+                    self.device_combo.setCurrentIndex(index)
+        finally:
+            self._loading_settings = False
 
     def _save_settings(self):
+        if self._loading_settings:
+            return
         settings_module.save_settings(
             {
                 "zoom_slider_value": self.zoom_slider.value(),
@@ -667,6 +688,10 @@ class MainWindow(QMainWindow):
     def _on_recording_started(self, path):
         self._recording = True
         self.record_button.setText("Stop Recording")
+        # Rotation can swap the frame's width/height (see apply_rotation),
+        # which would corrupt an in-progress recording's fixed-size output —
+        # block changing it until this recording is done.
+        self._set_rotation_controls_enabled(False)
         if self.worker is not None and self.worker.using_fallback_codec:
             self.statusBar().showMessage(
                 f"Recording to {path} — as mp4v (install ffmpeg for a more widely playable format)"
@@ -674,10 +699,21 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Recording to {path}")
 
-    def _on_recording_stopped(self, path):
+    def _on_recording_stopped(self, path, failed):
         self._recording = False
+        self._set_rotation_controls_enabled(True)
         self.record_button.setText("Start Recording")
-        self.statusBar().showMessage(f"Recording saved: {path}" if path else "Recording stopped")
+        if failed:
+            self.statusBar().showMessage(
+                f"Recording failed — {path} may be incomplete or unplayable" if path else "Recording failed"
+            )
+        else:
+            self.statusBar().showMessage(f"Recording saved: {path}" if path else "Recording stopped")
+
+    def _set_rotation_controls_enabled(self, enabled):
+        self.rotation_slider.setEnabled(enabled)
+        for button in self.rotation_snap_buttons:
+            button.setEnabled(enabled)
 
     # -- window lifecycle -------------------------------------------------- #
 
