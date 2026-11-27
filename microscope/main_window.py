@@ -1,14 +1,16 @@
+import math
 import os
 from datetime import datetime
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -18,11 +20,23 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from . import settings as settings_module
 from . import v4l2_controls
 from .camera import CameraWorker, can_capture
+from .coords import frame_to_pixmap, widget_to_frame
 from .devices import list_video_devices
 
 CAPTURE_DIR = os.path.join(os.path.expanduser("~"), "Pictures", "USBMicroscope")
+MEASUREMENT_UNITS = ("µm", "mm", "cm")
+
+
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal(object)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit(event.pos())
+        super().mousePressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -32,8 +46,25 @@ class MainWindow(QMainWindow):
         self.worker = None
         self._recording = False
         self._device_path = None
+        self._last_qimage = None
+        self._last_frame_size = None
+        self._measure_mode = False
+        self._calibrate_mode = False
+        self._pending_point = None
+        self._measurements = []
+        self._calibration = None
+        # Populating the device dropdown and restoring saved settings both
+        # drive widgets programmatically (setChecked, setCurrentIndex, ...),
+        # which fire the same signals a real user action would — and those
+        # call _save_settings(). Suppress saving for this whole startup
+        # sequence, not just _load_settings() itself, since _refresh_devices()
+        # runs first and would otherwise overwrite the settings file with
+        # still-default values before they're even loaded.
+        self._loading_settings = True
         self._build_ui()
         self._refresh_devices()
+        self._load_settings()
+        self._loading_settings = False
 
     # -- UI construction ---------------------------------------------------- #
 
@@ -42,10 +73,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
-        self.video_label = QLabel("No signal")
+        self.video_label = ClickableLabel("No signal")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setMinimumSize(640, 480)
         self.video_label.setStyleSheet("background-color: black; color: gray;")
+        self.video_label.clicked.connect(self._on_video_clicked)
         root.addWidget(self.video_label, 1)
 
         side = QVBoxLayout()
@@ -53,6 +85,7 @@ class MainWindow(QMainWindow):
 
         device_row = QHBoxLayout()
         self.device_combo = QComboBox()
+        self.device_combo.currentIndexChanged.connect(lambda _index: self._save_settings())
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self._refresh_devices)
         device_row.addWidget(self.device_combo)
@@ -70,9 +103,30 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setValue(10)
         self.zoom_value_label = QLabel("1.0x")
         self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        self.zoom_slider.sliderReleased.connect(self._save_settings)
         zoom_layout.addWidget(self.zoom_slider)
         zoom_layout.addWidget(self.zoom_value_label)
         side.addWidget(zoom_box)
+
+        rotation_box = QGroupBox("Rotation")
+        rotation_layout = QVBoxLayout(rotation_box)
+        self.rotation_slider = QSlider(Qt.Horizontal)
+        self.rotation_slider.setRange(0, 359)
+        self.rotation_slider.setValue(0)
+        self.rotation_value_label = QLabel("0°")
+        self.rotation_slider.valueChanged.connect(self._on_rotation_changed)
+        self.rotation_slider.sliderReleased.connect(self._save_settings)
+        rotation_layout.addWidget(self.rotation_slider)
+        rotation_layout.addWidget(self.rotation_value_label)
+        snap_row = QHBoxLayout()
+        self.rotation_snap_buttons = []
+        for angle in (0, 90, 180, 270):
+            snap_button = QPushButton(f"{angle}°")
+            snap_button.clicked.connect(lambda _checked, a=angle: self._snap_rotation(a))
+            snap_row.addWidget(snap_button)
+            self.rotation_snap_buttons.append(snap_button)
+        rotation_layout.addLayout(snap_row)
+        side.addWidget(rotation_box)
 
         overlay_box = QGroupBox("Overlay")
         overlay_layout = QVBoxLayout(overlay_box)
@@ -95,6 +149,44 @@ class MainWindow(QMainWindow):
         self.stabilize_check.toggled.connect(self._on_stabilize_toggled)
         stabilize_layout.addWidget(self.stabilize_check)
         side.addWidget(stabilize_box)
+
+        measure_box = QGroupBox("Measurement")
+        measure_layout = QVBoxLayout(measure_box)
+        unit_row = QHBoxLayout()
+        unit_row.addWidget(QLabel("Unit:"))
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItems(MEASUREMENT_UNITS)
+        self.unit_combo.setCurrentText("mm")
+        self.unit_combo.currentTextChanged.connect(lambda _text: self._save_settings())
+        unit_row.addWidget(self.unit_combo)
+        measure_layout.addLayout(unit_row)
+
+        self.calibration_label = QLabel("Not calibrated")
+        measure_layout.addWidget(self.calibration_label)
+
+        calibrate_row = QHBoxLayout()
+        self.calibrate_button = QPushButton("Calibrate")
+        self.calibrate_button.setToolTip(
+            "Click two points a known real-world distance apart (e.g. along a\n"
+            "ruler or a feature of known size), then enter that distance.\n"
+            "Valid only for the digital zoom level active right now — zooming\n"
+            "in or out afterward is compensated for automatically, but\n"
+            "changing the camera's own optical/hardware zoom or focus distance\n"
+            "is not, and needs a fresh calibration."
+        )
+        self.calibrate_button.clicked.connect(self._start_calibration)
+        calibrate_row.addWidget(self.calibrate_button)
+        measure_layout.addLayout(calibrate_row)
+
+        measure_row = QHBoxLayout()
+        self.measure_button = QPushButton("Measure")
+        self.measure_button.clicked.connect(self._toggle_measure_mode)
+        self.clear_measure_button = QPushButton("Clear")
+        self.clear_measure_button.clicked.connect(self._clear_measurements)
+        measure_row.addWidget(self.measure_button)
+        measure_row.addWidget(self.clear_measure_button)
+        measure_layout.addLayout(measure_row)
+        side.addWidget(measure_box)
 
         self.hw_controls_container = QVBoxLayout()
         side.addLayout(self.hw_controls_container)
@@ -154,6 +246,7 @@ class MainWindow(QMainWindow):
 
         self.worker = CameraWorker(device_path)
         self.worker.zoom = self.zoom_slider.value() / 10.0
+        self.worker.rotation = self.rotation_slider.value()
         self.worker.show_grid = self.grid_check.isChecked()
         self.worker.show_crosshair = self.crosshair_check.isChecked()
         self.worker.stabilize = self.stabilize_check.isChecked()
@@ -168,53 +261,291 @@ class MainWindow(QMainWindow):
         self.device_combo.setEnabled(False)
         self._device_path = device_path
         self._build_hardware_controls(device_path)
+        self._save_settings()
         self.statusBar().showMessage(f"Streaming from {device_path}")
 
     def _stop_stream(self):
         if self.worker is None:
             return
-        if self._recording:
+        was_recording = self._recording
+        if was_recording:
             self.worker.request_recording_stop()
         self.worker.stop()
-        self.worker.wait(2000)
+        # Finalizing an ffmpeg-backed recording (closing its moov atom) can
+        # take a while on a large file — give it as much room as the
+        # recorder itself allows before giving up (see recorder.py), plus a
+        # margin for the rest of the thread's own teardown.
+        self.worker.wait(35000 if was_recording else 2000)
         self.worker = None
         self._recording = False
+        self._set_rotation_controls_enabled(True)
         self.record_button.setText("Start Recording")
         self.stream_button.setText("Start Stream")
         self.device_combo.setEnabled(True)
         self.video_label.setText("No signal")
         self.video_label.setPixmap(QPixmap())
+        self._last_qimage = None
+        self._last_frame_size = None
         self.statusBar().showMessage("Stream stopped")
 
     def _on_frame(self, qimage):
-        pixmap = QPixmap.fromImage(qimage)
-        scaled = pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.video_label.setPixmap(scaled)
+        self._last_qimage = qimage
+        self._last_frame_size = (qimage.width(), qimage.height())
+        self._redraw_display()
 
     def _on_worker_error(self, message):
         self.statusBar().showMessage(message)
         if "Could not open" in message or "Lost signal" in message:
             self._stop_stream()
 
-    # -- digital zoom / overlay ---------------------------------------------- #
+    # -- digital zoom / rotation / overlay ------------------------------------ #
 
     def _on_zoom_changed(self, value):
         zoom = value / 10.0
         self.zoom_value_label.setText(f"{zoom:.1f}x")
         if self.worker is not None:
             self.worker.zoom = zoom
+        self._cancel_pending_point("Zoom changed")
+
+    def _on_rotation_changed(self, value):
+        self.rotation_value_label.setText(f"{value}°")
+        if self.worker is not None:
+            self.worker.rotation = value
+        self._cancel_pending_point("Rotation changed")
+
+    def _cancel_pending_point(self, reason):
+        # The first click of a measure/calibrate pair is stored in frame
+        # coordinates for whatever zoom/rotation was active at that moment;
+        # pairing it with a second click taken under a *different* zoom or
+        # rotation would silently measure the wrong thing.
+        if self._pending_point is not None:
+            self._pending_point = None
+            self.statusBar().showMessage(f"{reason} — click the first point again")
+            self._redraw_display()
+
+    def _snap_rotation(self, angle):
+        self.rotation_slider.setValue(angle)
+        self._save_settings()
 
     def _on_crosshair_toggled(self, checked):
         if self.worker is not None:
             self.worker.show_crosshair = checked
+        self._save_settings()
 
     def _on_grid_toggled(self, checked):
         if self.worker is not None:
             self.worker.show_grid = checked
+        self._save_settings()
 
     def _on_stabilize_toggled(self, checked):
         if self.worker is not None:
             self.worker.set_stabilize(checked)
+        self._save_settings()
+
+    # -- point-to-point measurement / calibration ----------------------------- #
+
+    def _on_video_clicked(self, pos):
+        if not (self._measure_mode or self._calibrate_mode):
+            return
+        if self.worker is None or self._last_frame_size is None:
+            return
+        pixmap = self.video_label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        frame_w, frame_h = self._last_frame_size
+        point = widget_to_frame(
+            pos.x(), pos.y(),
+            self.video_label.width(), self.video_label.height(),
+            pixmap.width(), pixmap.height(),
+            frame_w, frame_h,
+        )
+        if point is None:
+            return
+
+        if self._pending_point is None:
+            self._pending_point = point
+            self._redraw_display()
+            return
+
+        p1, p2 = self._pending_point, point
+        self._pending_point = None
+        pixel_distance = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if self._calibrate_mode:
+            self._finish_calibration(pixel_distance)
+        else:
+            self._finish_measurement(p1, p2, pixel_distance)
+
+    def _start_calibration(self):
+        if self.worker is None:
+            QMessageBox.information(self, "Not streaming", "Start the stream before calibrating.")
+            return
+        self._calibrate_mode = True
+        self._measure_mode = False
+        self.measure_button.setText("Measure")
+        self._pending_point = None
+        self.statusBar().showMessage("Calibration: click two points of a known real-world distance apart")
+        self._redraw_display()
+
+    def _finish_calibration(self, pixel_distance):
+        self._calibrate_mode = False
+        if pixel_distance < 1e-6:
+            self.statusBar().showMessage("Calibration points were identical — try again")
+            self._redraw_display()
+            return
+        unit = self.unit_combo.currentText()
+        real_distance, ok = QInputDialog.getDouble(
+            self, "Calibrate", f"Real distance between the two points ({unit}):", 1.0, 0.0001, 1_000_000.0, 4
+        )
+        if not ok or real_distance <= 0:
+            self.statusBar().showMessage("Calibration cancelled")
+            self._redraw_display()
+            return
+        current_zoom = self.zoom_slider.value() / 10.0
+        pixels_per_unit_at_zoom1 = (pixel_distance / real_distance) / current_zoom
+        self._calibration = {"pixels_per_unit": pixels_per_unit_at_zoom1, "unit": unit}
+        self._update_calibration_label()
+        self._save_settings()
+        self.statusBar().showMessage(
+            f"Calibrated: {pixels_per_unit_at_zoom1:.3f} px/{unit} at 1.0x digital zoom"
+        )
+        self._redraw_display()
+
+    def _toggle_measure_mode(self):
+        if self.worker is None:
+            QMessageBox.information(self, "Not streaming", "Start the stream before measuring.")
+            return
+        self._measure_mode = not self._measure_mode
+        self._calibrate_mode = False
+        self._pending_point = None
+        self.measure_button.setText("Stop Measuring" if self._measure_mode else "Measure")
+        if self._measure_mode:
+            self.statusBar().showMessage("Measure: click two points to measure the distance between them")
+        self._redraw_display()
+
+    def _finish_measurement(self, p1, p2, pixel_distance):
+        current_zoom = self.zoom_slider.value() / 10.0
+        if self._calibration is not None:
+            pixels_per_unit = self._calibration["pixels_per_unit"] * current_zoom
+            real_distance = pixel_distance / pixels_per_unit if pixels_per_unit else 0.0
+            text = f"{real_distance:.3f} {self._calibration['unit']}"
+        else:
+            text = f"{pixel_distance:.1f} px"
+        self._measurements.append({"p1": p1, "p2": p2, "text": text})
+        self.statusBar().showMessage(f"Measured: {text}")
+        self._redraw_display()
+
+    def _clear_measurements(self):
+        self._measurements.clear()
+        self._pending_point = None
+        self._redraw_display()
+
+    def _update_calibration_label(self):
+        if self._calibration is None:
+            self.calibration_label.setText("Not calibrated")
+        else:
+            self.calibration_label.setText(
+                f"{self._calibration['pixels_per_unit']:.3f} px/{self._calibration['unit']} (at 1.0x zoom)"
+            )
+
+    def _redraw_display(self):
+        if self._last_qimage is None:
+            return
+        pixmap = QPixmap.fromImage(self._last_qimage)
+        scaled = pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if self._measurements or self._pending_point is not None:
+            scaled = self._draw_measurements(scaled)
+        self.video_label.setPixmap(scaled)
+
+    def _draw_measurements(self, pixmap):
+        result = QPixmap(pixmap)
+        frame_w, frame_h = self._last_frame_size
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(255, 255, 0), 2))
+        for measurement in self._measurements:
+            p1 = self._to_pixmap_point(measurement["p1"], pixmap.width(), pixmap.height(), frame_w, frame_h)
+            p2 = self._to_pixmap_point(measurement["p2"], pixmap.width(), pixmap.height(), frame_w, frame_h)
+            if p1 is None or p2 is None:
+                continue
+            painter.drawLine(p1[0], p1[1], p2[0], p2[1])
+            painter.drawEllipse(p1[0] - 3, p1[1] - 3, 6, 6)
+            painter.drawEllipse(p2[0] - 3, p2[1] - 3, 6, 6)
+            painter.drawText((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2, measurement["text"])
+        if self._pending_point is not None:
+            p = self._to_pixmap_point(self._pending_point, pixmap.width(), pixmap.height(), frame_w, frame_h)
+            if p is not None:
+                painter.setPen(QPen(QColor(255, 0, 0), 2))
+                painter.drawEllipse(p[0] - 4, p[1] - 4, 8, 8)
+        painter.end()
+        return result
+
+    @staticmethod
+    def _to_pixmap_point(frame_point, pixmap_w, pixmap_h, frame_w, frame_h):
+        point = frame_to_pixmap(frame_point[0], frame_point[1], pixmap_w, pixmap_h, frame_w, frame_h)
+        return (int(point[0]), int(point[1])) if point is not None else None
+
+    # -- settings persistence -------------------------------------------------- #
+
+    def _load_settings(self):
+        data = settings_module.load_settings()
+        if not data:
+            return
+
+        zoom_value = data.get("zoom_slider_value")
+        if (
+            isinstance(zoom_value, int)
+            and self.zoom_slider.minimum() <= zoom_value <= self.zoom_slider.maximum()
+        ):
+            self.zoom_slider.setValue(zoom_value)
+
+        rotation_value = data.get("rotation")
+        if isinstance(rotation_value, int) and 0 <= rotation_value <= 359:
+            self.rotation_slider.setValue(rotation_value)
+
+        self.grid_check.setChecked(bool(data.get("show_grid", False)))
+        self.crosshair_check.setChecked(bool(data.get("show_crosshair", False)))
+        self.stabilize_check.setChecked(bool(data.get("stabilize", False)))
+
+        unit = data.get("unit")
+        if unit in MEASUREMENT_UNITS:
+            self.unit_combo.setCurrentText(unit)
+
+        save_dir = data.get("save_dir")
+        if isinstance(save_dir, str) and save_dir:
+            self._save_dir = save_dir
+            self.save_dir_label.setText(save_dir)
+
+        calibration = data.get("calibration")
+        if (
+            isinstance(calibration, dict)
+            and isinstance(calibration.get("pixels_per_unit"), (int, float))
+            and calibration.get("unit") in MEASUREMENT_UNITS
+        ):
+            self._calibration = calibration
+            self._update_calibration_label()
+
+        device_path = data.get("device_path")
+        if isinstance(device_path, str):
+            index = self.device_combo.findData(device_path)
+            if index >= 0:
+                self.device_combo.setCurrentIndex(index)
+
+    def _save_settings(self):
+        if self._loading_settings:
+            return
+        settings_module.save_settings(
+            {
+                "zoom_slider_value": self.zoom_slider.value(),
+                "rotation": self.rotation_slider.value(),
+                "show_grid": self.grid_check.isChecked(),
+                "show_crosshair": self.crosshair_check.isChecked(),
+                "stabilize": self.stabilize_check.isChecked(),
+                "unit": self.unit_combo.currentText(),
+                "save_dir": self._save_dir,
+                "calibration": self._calibration,
+                "device_path": self.device_combo.currentData(),
+            }
+        )
 
     # -- hardware (v4l2) controls --------------------------------------------- #
 
@@ -236,7 +567,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        controls = [c for c in v4l2_controls.list_controls(device_path) if c["type"] in ("int", "bool")]
+        controls = [
+            c
+            for c in v4l2_controls.list_controls(device_path)
+            if c["type"] in ("int", "bool") or (c["type"] == "menu" and c["menu_items"])
+        ]
         led_controls = [c for c in controls if self._classify(c["name"]) == "led"]
         zoom_controls = [c for c in controls if self._classify(c["name"]) == "zoom"]
         other_controls = [c for c in controls if self._classify(c["name"]) == "other"]
@@ -277,6 +612,18 @@ class MainWindow(QMainWindow):
                 lambda checked, name=control["name"]: self._set_hw_control(name, int(checked))
             )
             layout.addWidget(checkbox)
+        elif control["type"] == "menu":
+            combo = QComboBox()
+            current_index = 0
+            for index, (item_value, label) in enumerate(sorted(control["menu_items"].items())):
+                combo.addItem(label, item_value)
+                if item_value == control["value"]:
+                    current_index = index
+            combo.setCurrentIndex(current_index)
+            combo.currentIndexChanged.connect(
+                lambda index, c=combo, name=control["name"]: self._set_hw_control(name, c.itemData(index))
+            )
+            layout.addWidget(combo)
         else:
             slider = QSlider(Qt.Horizontal)
             slider.setRange(control["min"] or 0, control["max"] or 100)
@@ -296,6 +643,19 @@ class MainWindow(QMainWindow):
     def _set_hw_control(self, name, value):
         if not v4l2_controls.set_control(self._device_path, name, value):
             self.statusBar().showMessage(f"Failed to set {name}")
+            return
+        # Read the value straight back: some cheap UVC cameras accept a
+        # control write (ioctl succeeds) but their firmware never actually
+        # applies it — reporting the real post-write value tells that
+        # apart from an app-side bug, instead of just assuming success.
+        actual = v4l2_controls.get_control(self._device_path, name)
+        if actual is not None and actual != value:
+            self.statusBar().showMessage(
+                f"{name}: set to {value}, but camera still reports {actual} "
+                "— this camera may be ignoring that control"
+            )
+        else:
+            self.statusBar().showMessage(f"Set {name} = {value}")
 
     @staticmethod
     def _clear_layout(layout):
@@ -312,6 +672,7 @@ class MainWindow(QMainWindow):
         if chosen:
             self._save_dir = chosen
             self.save_dir_label.setText(chosen)
+            self._save_settings()
 
     def _take_snapshot(self):
         if self.worker is None:
@@ -338,12 +699,32 @@ class MainWindow(QMainWindow):
     def _on_recording_started(self, path):
         self._recording = True
         self.record_button.setText("Stop Recording")
-        self.statusBar().showMessage(f"Recording to {path}")
+        # Rotation can swap the frame's width/height (see apply_rotation),
+        # which would corrupt an in-progress recording's fixed-size output —
+        # block changing it until this recording is done.
+        self._set_rotation_controls_enabled(False)
+        if self.worker is not None and self.worker.using_fallback_codec:
+            self.statusBar().showMessage(
+                f"Recording to {path} — as mp4v (install ffmpeg for a more widely playable format)"
+            )
+        else:
+            self.statusBar().showMessage(f"Recording to {path}")
 
-    def _on_recording_stopped(self, path):
+    def _on_recording_stopped(self, path, failed):
         self._recording = False
+        self._set_rotation_controls_enabled(True)
         self.record_button.setText("Start Recording")
-        self.statusBar().showMessage(f"Recording saved: {path}" if path else "Recording stopped")
+        if failed:
+            self.statusBar().showMessage(
+                f"Recording failed — {path} may be incomplete or unplayable" if path else "Recording failed"
+            )
+        else:
+            self.statusBar().showMessage(f"Recording saved: {path}" if path else "Recording stopped")
+
+    def _set_rotation_controls_enabled(self, enabled):
+        self.rotation_slider.setEnabled(enabled)
+        for button in self.rotation_snap_buttons:
+            button.setEnabled(enabled)
 
     # -- window lifecycle -------------------------------------------------- #
 

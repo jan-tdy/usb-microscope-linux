@@ -2,7 +2,27 @@ import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
+from .recorder import FfmpegRecorder, ffmpeg_available
 from .stabilizer import VibrationStabilizer
+
+
+def apply_rotation(frame, degrees):
+    normalized = degrees % 360
+    if normalized == 0:
+        return frame
+    # A cardinal turn swaps width/height, so it needs cv2.rotate to keep the
+    # full frame; warping it onto the original (unswapped) canvas instead
+    # would crop out most of a non-square image. Only in-between angles (for
+    # leveling the view) fall back to an in-place warp around the center.
+    if normalized == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    if normalized == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    if normalized == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    height, width = frame.shape[:2]
+    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), normalized, 1.0)
+    return cv2.warpAffine(frame, matrix, (width, height), borderMode=cv2.BORDER_REPLICATE)
 
 
 def apply_zoom(frame, zoom):
@@ -66,12 +86,13 @@ class CameraWorker(QThread):
     error = pyqtSignal(str)
     snapshot_saved = pyqtSignal(str)
     recording_started = pyqtSignal(str)
-    recording_stopped = pyqtSignal(str)
+    recording_stopped = pyqtSignal(str, bool)
 
     def __init__(self, device_path, parent=None):
         super().__init__(parent)
         self.device_path = device_path
         self.zoom = 1.0
+        self.rotation = 0
         self.show_grid = False
         self.show_crosshair = False
         self.stabilize = False
@@ -83,6 +104,8 @@ class CameraWorker(QThread):
         self._pending_snapshot_path = None
         self._pending_stabilizer_reset = False
         self._stabilizer = VibrationStabilizer()
+        self.using_fallback_codec = False
+        self._recording_failure_reported = False
 
     def request_snapshot(self, path):
         self._pending_snapshot_path = path
@@ -118,11 +141,15 @@ class CameraWorker(QThread):
                     self._stabilizer.reset()
                 if self.stabilize:
                     frame = self._stabilizer.stabilize(frame)
+                frame = apply_rotation(frame, self.rotation)
                 frame = apply_zoom(frame, self.zoom)
                 self._handle_pending_recording(cap, frame)
                 self._handle_pending_snapshot(frame)
                 if self._writer is not None:
                     self._writer.write(frame)
+                    if getattr(self._writer, "failed", False) and not self._recording_failure_reported:
+                        self._recording_failure_reported = True
+                        self.error.emit(f"Recording encoder failed — {self._record_path} may be incomplete")
                 display = frame.copy()
                 if self.show_grid:
                     draw_grid(display)
@@ -130,9 +157,14 @@ class CameraWorker(QThread):
                     draw_crosshair(display)
                 self.frame_ready.emit(to_qimage(display))
         finally:
+            # Reaches here directly, without ever hitting the pending-stop
+            # branch below, whenever _running flips False between loop
+            # iterations (a plain Stop Stream while recording) or the loop
+            # breaks out on a device error — so this path needs the same
+            # failure reporting, not just a silent release.
             if self._writer is not None:
-                self._writer.release()
-                self._writer = None
+                path, failed = self._release_writer()
+                self.recording_stopped.emit(path or "", failed)
             cap.release()
 
     def _handle_pending_recording(self, cap, frame):
@@ -141,21 +173,44 @@ class CameraWorker(QThread):
             self._pending_record_start = None
             height, width = frame.shape[:2]
             fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+            # OpenCV's own bundled ffmpeg has no H.264 encoder, so without a
+            # system ffmpeg this can only write MPEG-4 Part 2 ("mp4v") —
+            # many phones, browsers and messaging apps won't open that file
+            # at all. Note it instead of a separate status-bar message: that
+            # message would just be overwritten by recording_started an
+            # instant later and the user would never actually see it.
+            self.using_fallback_codec = not ffmpeg_available()
+            if self.using_fallback_codec:
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+            else:
+                writer = FfmpegRecorder(path, width, height, fps)
             if not writer.isOpened():
                 self.error.emit(f"Failed to start recording to {path}")
             else:
                 self._writer = writer
                 self._record_path = path
+                self._recording_failure_reported = False
                 self.recording_started.emit(path)
         if self._pending_record_stop:
             self._pending_record_stop = False
             if self._writer is not None:
-                self._writer.release()
-                self._writer = None
-                path, self._record_path = self._record_path, None
-                self.recording_stopped.emit(path or "")
+                path, failed = self._release_writer()
+                # Carry the failure in the signal itself, not a worker
+                # attribute read back later: stopping the stream can null
+                # out the UI's reference to this worker before a queued
+                # cross-thread signal is actually delivered and handled.
+                self.recording_stopped.emit(path or "", failed)
+
+    def _release_writer(self):
+        self._writer.release()
+        failed = getattr(self._writer, "failed", False)
+        self._writer = None
+        path, self._record_path = self._record_path, None
+        if failed and not self._recording_failure_reported:
+            self._recording_failure_reported = True
+            self.error.emit(f"Recording encoder failed — {path} may be incomplete")
+        return path, failed
 
     def _handle_pending_snapshot(self, frame):
         if self._pending_snapshot_path is None:
