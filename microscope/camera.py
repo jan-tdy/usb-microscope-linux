@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
@@ -52,24 +55,57 @@ def draw_crosshair(frame, color=(0, 0, 255), size=20):
     cv2.line(frame, (cx, cy - size), (cx, cy + size), color, 1)
 
 
-def can_capture(device_path, attempts=5):
-    """Whether this device node actually delivers video frames.
-
-    Some UVC cameras expose a second /dev/videoN node for metadata only
-    (no image data) alongside their real capture node; opening it
-    "succeeds" but every read() fails, so a few read attempts tell them apart.
-    """
-    cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        cap.release()
-        return False
-    ok = False
+_CAPTURE_PROBE_SCRIPT = """
+import sys
+import cv2
+path = sys.argv[1]
+attempts = int(sys.argv[2])
+cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+ok = False
+if cap.isOpened():
     for _ in range(attempts):
         ok, _ = cap.read()
         if ok:
             break
-    cap.release()
-    return ok
+cap.release()
+sys.exit(0 if ok else 1)
+"""
+
+
+def can_capture(device_path, attempts=1, timeout=15.0):
+    """Whether this device node actually delivers video frames.
+
+    Some UVC cameras expose a second /dev/videoN node for metadata only
+    (no image data) alongside their real capture node; opening it
+    "succeeds" but every read() fails, so a read attempt tells them apart.
+    On some camera/driver combinations, a real capture node that simply
+    isn't producing frames makes OpenCV's own V4L2 backend block in
+    read() for a long time before giving up on that one attempt — measured
+    directly at ~10.3s on a real stuck device — rather than failing fast.
+    5 attempts at that cost each is what turned "refresh the device list"
+    into a multi-minute freeze.
+
+    The fix here runs the actual probe in a subprocess so a hard
+    wall-clock cap can kill it if needed — but that cap must stay safely
+    *above* OpenCV's own per-attempt timeout, or it would kill a read that
+    hadn't even been given the chance to fail (or succeed) on its own
+    terms yet, wrongly excluding a device that was simply a bit slow
+    rather than genuinely stuck. A device that doesn't deliver a frame on
+    its first attempt — within OpenCV's own generous ~10s window — isn't
+    going to be rescued by trying again; a working camera responds in
+    milliseconds, not seconds, so one attempt is enough to tell them
+    apart, and keeps the worst case bounded to roughly one `timeout` per
+    candidate device instead of `attempts` of them.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _CAPTURE_PROBE_SCRIPT, device_path, str(attempts)],
+            timeout=timeout,
+            capture_output=True,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
 
 
 def to_qimage(frame_bgr):
