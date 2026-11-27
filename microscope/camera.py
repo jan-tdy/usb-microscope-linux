@@ -84,6 +84,8 @@ class CameraWorker(QThread):
         self._pending_snapshot_path = None
         self._pending_stabilizer_reset = False
         self._stabilizer = VibrationStabilizer()
+        self.using_fallback_codec = False
+        self._recording_failure_reported = False
 
     def request_snapshot(self, path):
         self._pending_snapshot_path = path
@@ -124,6 +126,9 @@ class CameraWorker(QThread):
                 self._handle_pending_snapshot(frame)
                 if self._writer is not None:
                     self._writer.write(frame)
+                    if getattr(self._writer, "failed", False) and not self._recording_failure_reported:
+                        self._recording_failure_reported = True
+                        self.error.emit(f"Recording encoder failed — {self._record_path} may be incomplete")
                 display = frame.copy()
                 if self.show_grid:
                     draw_grid(display)
@@ -142,27 +147,34 @@ class CameraWorker(QThread):
             self._pending_record_start = None
             height, width = frame.shape[:2]
             fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
-            if ffmpeg_available():
-                writer = FfmpegRecorder(path, width, height, fps)
-            else:
-                # OpenCV's own bundled ffmpeg has no H.264 encoder, so this
-                # can only write MPEG-4 Part 2 ("mp4v") — many phones,
-                # browsers and messaging apps won't open that file at all.
-                self.error.emit("ffmpeg not found — recording as mp4v, which many players can't open")
+            # OpenCV's own bundled ffmpeg has no H.264 encoder, so without a
+            # system ffmpeg this can only write MPEG-4 Part 2 ("mp4v") —
+            # many phones, browsers and messaging apps won't open that file
+            # at all. Note it instead of a separate status-bar message: that
+            # message would just be overwritten by recording_started an
+            # instant later and the user would never actually see it.
+            self.using_fallback_codec = not ffmpeg_available()
+            if self.using_fallback_codec:
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+            else:
+                writer = FfmpegRecorder(path, width, height, fps)
             if not writer.isOpened():
                 self.error.emit(f"Failed to start recording to {path}")
             else:
                 self._writer = writer
                 self._record_path = path
+                self._recording_failure_reported = False
                 self.recording_started.emit(path)
         if self._pending_record_stop:
             self._pending_record_stop = False
             if self._writer is not None:
                 self._writer.release()
+                failed = getattr(self._writer, "failed", False)
                 self._writer = None
                 path, self._record_path = self._record_path, None
+                if failed and not self._recording_failure_reported:
+                    self.error.emit(f"Recording encoder failed — {path} may be incomplete")
                 self.recording_stopped.emit(path or "")
 
     def _handle_pending_snapshot(self, frame):

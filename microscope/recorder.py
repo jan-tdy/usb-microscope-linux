@@ -21,6 +21,7 @@ class FfmpegRecorder:
 
     def __init__(self, path, width, height, fps):
         self.path = path
+        self.failed = False
         self._process = subprocess.Popen(
             [
                 "ffmpeg",
@@ -49,7 +50,10 @@ class FfmpegRecorder:
         try:
             self._process.stdin.write(frame.tobytes())
         except (BrokenPipeError, OSError):
-            pass
+            # ffmpeg exited on its own (bad args, disk full, ...) — note
+            # it so release() and the caller can tell this recording
+            # didn't actually finish writing a valid file.
+            self.failed = True
 
     def release(self):
         if self._process.stdin is not None:
@@ -62,3 +66,5 @@ class FfmpegRecorder:
         except subprocess.TimeoutExpired:
             self._process.kill()
             self._process.wait()
+        if self._process.returncode != 0:
+            self.failed = True

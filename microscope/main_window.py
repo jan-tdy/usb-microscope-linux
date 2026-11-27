@@ -370,7 +370,12 @@ class MainWindow(QMainWindow):
     def _on_recording_started(self, path):
         self._recording = True
         self.record_button.setText("Stop Recording")
-        self.statusBar().showMessage(f"Recording to {path}")
+        if self.worker is not None and self.worker.using_fallback_codec:
+            self.statusBar().showMessage(
+                f"Recording to {path} — as mp4v (install ffmpeg for a more widely playable format)"
+            )
+        else:
+            self.statusBar().showMessage(f"Recording to {path}")
 
     def _on_recording_stopped(self, path):
         self._recording = False
