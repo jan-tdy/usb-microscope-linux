@@ -53,10 +53,18 @@ class MainWindow(QMainWindow):
         self._pending_point = None
         self._measurements = []
         self._calibration = None
-        self._loading_settings = False
+        # Populating the device dropdown and restoring saved settings both
+        # drive widgets programmatically (setChecked, setCurrentIndex, ...),
+        # which fire the same signals a real user action would — and those
+        # call _save_settings(). Suppress saving for this whole startup
+        # sequence, not just _load_settings() itself, since _refresh_devices()
+        # runs first and would otherwise overwrite the settings file with
+        # still-default values before they're even loaded.
+        self._loading_settings = True
         self._build_ui()
         self._refresh_devices()
         self._load_settings()
+        self._loading_settings = False
 
     # -- UI construction ---------------------------------------------------- #
 
@@ -77,6 +85,7 @@ class MainWindow(QMainWindow):
 
         device_row = QHBoxLayout()
         self.device_combo = QComboBox()
+        self.device_combo.currentIndexChanged.connect(lambda _index: self._save_settings())
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self._refresh_devices)
         device_row.addWidget(self.device_combo)
@@ -296,11 +305,23 @@ class MainWindow(QMainWindow):
         self.zoom_value_label.setText(f"{zoom:.1f}x")
         if self.worker is not None:
             self.worker.zoom = zoom
+        self._cancel_pending_point("Zoom changed")
 
     def _on_rotation_changed(self, value):
         self.rotation_value_label.setText(f"{value}°")
         if self.worker is not None:
             self.worker.rotation = value
+        self._cancel_pending_point("Rotation changed")
+
+    def _cancel_pending_point(self, reason):
+        # The first click of a measure/calibrate pair is stored in frame
+        # coordinates for whatever zoom/rotation was active at that moment;
+        # pairing it with a second click taken under a *different* zoom or
+        # rotation would silently measure the wrong thing.
+        if self._pending_point is not None:
+            self._pending_point = None
+            self.statusBar().showMessage(f"{reason} — click the first point again")
+            self._redraw_display()
 
     def _snap_rotation(self, angle):
         self.rotation_slider.setValue(angle)
@@ -470,54 +491,44 @@ class MainWindow(QMainWindow):
         if not data:
             return
 
-        # setChecked()/setCurrentText() below fire the same toggled/changed
-        # signals a real user action would, which call _save_settings() —
-        # and since this method hasn't restored save_dir/calibration/device
-        # yet at that point, that premature save would overwrite them on
-        # disk with their still-default values. Suppress saving until the
-        # whole restore is done.
-        self._loading_settings = True
-        try:
-            zoom_value = data.get("zoom_slider_value")
-            if (
-                isinstance(zoom_value, int)
-                and self.zoom_slider.minimum() <= zoom_value <= self.zoom_slider.maximum()
-            ):
-                self.zoom_slider.setValue(zoom_value)
+        zoom_value = data.get("zoom_slider_value")
+        if (
+            isinstance(zoom_value, int)
+            and self.zoom_slider.minimum() <= zoom_value <= self.zoom_slider.maximum()
+        ):
+            self.zoom_slider.setValue(zoom_value)
 
-            rotation_value = data.get("rotation")
-            if isinstance(rotation_value, int) and 0 <= rotation_value <= 359:
-                self.rotation_slider.setValue(rotation_value)
+        rotation_value = data.get("rotation")
+        if isinstance(rotation_value, int) and 0 <= rotation_value <= 359:
+            self.rotation_slider.setValue(rotation_value)
 
-            self.grid_check.setChecked(bool(data.get("show_grid", False)))
-            self.crosshair_check.setChecked(bool(data.get("show_crosshair", False)))
-            self.stabilize_check.setChecked(bool(data.get("stabilize", False)))
+        self.grid_check.setChecked(bool(data.get("show_grid", False)))
+        self.crosshair_check.setChecked(bool(data.get("show_crosshair", False)))
+        self.stabilize_check.setChecked(bool(data.get("stabilize", False)))
 
-            unit = data.get("unit")
-            if unit in MEASUREMENT_UNITS:
-                self.unit_combo.setCurrentText(unit)
+        unit = data.get("unit")
+        if unit in MEASUREMENT_UNITS:
+            self.unit_combo.setCurrentText(unit)
 
-            save_dir = data.get("save_dir")
-            if isinstance(save_dir, str) and save_dir:
-                self._save_dir = save_dir
-                self.save_dir_label.setText(save_dir)
+        save_dir = data.get("save_dir")
+        if isinstance(save_dir, str) and save_dir:
+            self._save_dir = save_dir
+            self.save_dir_label.setText(save_dir)
 
-            calibration = data.get("calibration")
-            if (
-                isinstance(calibration, dict)
-                and isinstance(calibration.get("pixels_per_unit"), (int, float))
-                and calibration.get("unit") in MEASUREMENT_UNITS
-            ):
-                self._calibration = calibration
-                self._update_calibration_label()
+        calibration = data.get("calibration")
+        if (
+            isinstance(calibration, dict)
+            and isinstance(calibration.get("pixels_per_unit"), (int, float))
+            and calibration.get("unit") in MEASUREMENT_UNITS
+        ):
+            self._calibration = calibration
+            self._update_calibration_label()
 
-            device_path = data.get("device_path")
-            if isinstance(device_path, str):
-                index = self.device_combo.findData(device_path)
-                if index >= 0:
-                    self.device_combo.setCurrentIndex(index)
-        finally:
-            self._loading_settings = False
+        device_path = data.get("device_path")
+        if isinstance(device_path, str):
+            index = self.device_combo.findData(device_path)
+            if index >= 0:
+                self.device_combo.setCurrentIndex(index)
 
     def _save_settings(self):
         if self._loading_settings:

@@ -157,9 +157,14 @@ class CameraWorker(QThread):
                     draw_crosshair(display)
                 self.frame_ready.emit(to_qimage(display))
         finally:
+            # Reaches here directly, without ever hitting the pending-stop
+            # branch below, whenever _running flips False between loop
+            # iterations (a plain Stop Stream while recording) or the loop
+            # breaks out on a device error — so this path needs the same
+            # failure reporting, not just a silent release.
             if self._writer is not None:
-                self._writer.release()
-                self._writer = None
+                path, failed = self._release_writer()
+                self.recording_stopped.emit(path or "", failed)
             cap.release()
 
     def _handle_pending_recording(self, cap, frame):
@@ -190,17 +195,22 @@ class CameraWorker(QThread):
         if self._pending_record_stop:
             self._pending_record_stop = False
             if self._writer is not None:
-                self._writer.release()
-                failed = getattr(self._writer, "failed", False)
-                self._writer = None
-                path, self._record_path = self._record_path, None
-                if failed and not self._recording_failure_reported:
-                    self.error.emit(f"Recording encoder failed — {path} may be incomplete")
+                path, failed = self._release_writer()
                 # Carry the failure in the signal itself, not a worker
                 # attribute read back later: stopping the stream can null
                 # out the UI's reference to this worker before a queued
                 # cross-thread signal is actually delivered and handled.
                 self.recording_stopped.emit(path or "", failed)
+
+    def _release_writer(self):
+        self._writer.release()
+        failed = getattr(self._writer, "failed", False)
+        self._writer = None
+        path, self._record_path = self._record_path, None
+        if failed and not self._recording_failure_reported:
+            self._recording_failure_reported = True
+            self.error.emit(f"Recording encoder failed — {path} may be incomplete")
+        return path, failed
 
     def _handle_pending_snapshot(self, frame):
         if self._pending_snapshot_path is None:
