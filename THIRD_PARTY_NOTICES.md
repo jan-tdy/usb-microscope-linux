@@ -10,6 +10,7 @@ you install yourself (`pip`/`apt`), and each keeps its own license:
 | OpenCV (`opencv-python`) | Apache License 2.0 | Video capture, image processing, recording |
 | NumPy | BSD 3-Clause | Pulled in by OpenCV for frame arrays |
 | v4l-utils (`v4l2-ctl`) | GPLv2 | Invoked as an external command, never linked into this program |
+| ffmpeg | GPL (a standard distro build with libx264 enabled, as used here, is GPL rather than LGPL) | Invoked as an external command for H.264 video recording, never linked into this program |
 
 **PyQt5 note:** PyQt5 is GPLv3 (or a paid Riverbank commercial license),
 not MIT. Depending on it as an external library, as this project does,

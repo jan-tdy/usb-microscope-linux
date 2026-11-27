@@ -173,10 +173,13 @@ class MainWindow(QMainWindow):
     def _stop_stream(self):
         if self.worker is None:
             return
-        if self._recording:
+        was_recording = self._recording
+        if was_recording:
             self.worker.request_recording_stop()
         self.worker.stop()
-        self.worker.wait(2000)
+        # Finalizing an ffmpeg-backed recording (closing its moov atom) can
+        # take a bit longer than plain capture teardown, so give it more room.
+        self.worker.wait(8000 if was_recording else 2000)
         self.worker = None
         self._recording = False
         self.record_button.setText("Start Recording")
@@ -236,7 +239,11 @@ class MainWindow(QMainWindow):
             )
             return
 
-        controls = [c for c in v4l2_controls.list_controls(device_path) if c["type"] in ("int", "bool")]
+        controls = [
+            c
+            for c in v4l2_controls.list_controls(device_path)
+            if c["type"] in ("int", "bool") or (c["type"] == "menu" and c["menu_items"])
+        ]
         led_controls = [c for c in controls if self._classify(c["name"]) == "led"]
         zoom_controls = [c for c in controls if self._classify(c["name"]) == "zoom"]
         other_controls = [c for c in controls if self._classify(c["name"]) == "other"]
@@ -277,6 +284,18 @@ class MainWindow(QMainWindow):
                 lambda checked, name=control["name"]: self._set_hw_control(name, int(checked))
             )
             layout.addWidget(checkbox)
+        elif control["type"] == "menu":
+            combo = QComboBox()
+            current_index = 0
+            for index, (item_value, label) in enumerate(sorted(control["menu_items"].items())):
+                combo.addItem(label, item_value)
+                if item_value == control["value"]:
+                    current_index = index
+            combo.setCurrentIndex(current_index)
+            combo.currentIndexChanged.connect(
+                lambda index, c=combo, name=control["name"]: self._set_hw_control(name, c.itemData(index))
+            )
+            layout.addWidget(combo)
         else:
             slider = QSlider(Qt.Horizontal)
             slider.setRange(control["min"] or 0, control["max"] or 100)
@@ -296,6 +315,19 @@ class MainWindow(QMainWindow):
     def _set_hw_control(self, name, value):
         if not v4l2_controls.set_control(self._device_path, name, value):
             self.statusBar().showMessage(f"Failed to set {name}")
+            return
+        # Read the value straight back: some cheap UVC cameras accept a
+        # control write (ioctl succeeds) but their firmware never actually
+        # applies it — reporting the real post-write value tells that
+        # apart from an app-side bug, instead of just assuming success.
+        actual = v4l2_controls.get_control(self._device_path, name)
+        if actual is not None and actual != value:
+            self.statusBar().showMessage(
+                f"{name}: set to {value}, but camera still reports {actual} "
+                "— this camera may be ignoring that control"
+            )
+        else:
+            self.statusBar().showMessage(f"Set {name} = {value}")
 
     @staticmethod
     def _clear_layout(layout):

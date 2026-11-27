@@ -2,6 +2,7 @@ import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
+from .recorder import FfmpegRecorder, ffmpeg_available
 from .stabilizer import VibrationStabilizer
 
 
@@ -141,8 +142,15 @@ class CameraWorker(QThread):
             self._pending_record_start = None
             height, width = frame.shape[:2]
             fps = cap.get(cv2.CAP_PROP_FPS) or 20.0
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+            if ffmpeg_available():
+                writer = FfmpegRecorder(path, width, height, fps)
+            else:
+                # OpenCV's own bundled ffmpeg has no H.264 encoder, so this
+                # can only write MPEG-4 Part 2 ("mp4v") — many phones,
+                # browsers and messaging apps won't open that file at all.
+                self.error.emit("ffmpeg not found — recording as mp4v, which many players can't open")
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
             if not writer.isOpened():
                 self.error.emit(f"Failed to start recording to {path}")
             else:
