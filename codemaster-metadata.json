@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "publisher": "jan-tdy",
+  "repo": "usb-microscope-linux",
+  "homepage": "https://github.com/jan-tdy/usb-microscope-linux",
+  "apps": [
+    {
+      "id": "usb-microscope-linux",
+      "name": "USB Microscope",
+      "tagline": "Live view, zoom, LED and recording for cheap USB microscopes",
+      "description": "A PyQt5 app for cheap USB microscope cameras on Linux. Shows a live UVC video stream, a digital zoom slider, snapshot and video recording, crosshair/grid overlays, and auto-detected hardware controls (LED/illumination, hardware zoom, and other v4l2 controls) when the connected camera exposes them.",
+      "category": "Utilities",
+      "version": "0.1.0",
+      "author": "JapySoft",
+      "icon": null,
+      "subdir": ".",
+      "entrypoint": "usb_microscope.py",
+      "run": "python3 usb_microscope.py",
+      "requirements": "requirements.txt",
+      "update_method": "sync",
+      "maintained": true
+    }
+  ]
+}
