@@ -72,20 +72,30 @@ sys.exit(0 if ok else 1)
 """
 
 
-def can_capture(device_path, attempts=5, timeout=5.0):
+def can_capture(device_path, attempts=1, timeout=15.0):
     """Whether this device node actually delivers video frames.
 
     Some UVC cameras expose a second /dev/videoN node for metadata only
     (no image data) alongside their real capture node; opening it
-    "succeeds" but every read() fails, so a few read attempts tell them
-    apart. But on some camera/driver combinations a real capture node that
-    simply isn't producing frames makes OpenCV's V4L2 backend block on
-    read() for a long time (its own internal timeout, not ours) instead of
-    failing fast — seen in practice as ~10s per read attempt, so 5 of them
-    stacked up across a few candidate devices turned "refresh the device
-    list" into a multi-minute freeze. Running the actual probe in a
-    subprocess lets us put a hard wall-clock cap on it and kill it outright
-    if that's exceeded, rather than being at the mercy of OpenCV's own.
+    "succeeds" but every read() fails, so a read attempt tells them apart.
+    On some camera/driver combinations, a real capture node that simply
+    isn't producing frames makes OpenCV's own V4L2 backend block in
+    read() for a long time before giving up on that one attempt — measured
+    directly at ~10.3s on a real stuck device — rather than failing fast.
+    5 attempts at that cost each is what turned "refresh the device list"
+    into a multi-minute freeze.
+
+    The fix here runs the actual probe in a subprocess so a hard
+    wall-clock cap can kill it if needed — but that cap must stay safely
+    *above* OpenCV's own per-attempt timeout, or it would kill a read that
+    hadn't even been given the chance to fail (or succeed) on its own
+    terms yet, wrongly excluding a device that was simply a bit slow
+    rather than genuinely stuck. A device that doesn't deliver a frame on
+    its first attempt — within OpenCV's own generous ~10s window — isn't
+    going to be rescued by trying again; a working camera responds in
+    milliseconds, not seconds, so one attempt is enough to tell them
+    apart, and keeps the worst case bounded to roughly one `timeout` per
+    candidate device instead of `attempts` of them.
     """
     try:
         result = subprocess.run(
