@@ -6,6 +6,14 @@ from .recorder import FfmpegRecorder, ffmpeg_available
 from .stabilizer import VibrationStabilizer
 
 
+def apply_rotation(frame, degrees):
+    if degrees % 360 == 0:
+        return frame
+    height, width = frame.shape[:2]
+    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), degrees, 1.0)
+    return cv2.warpAffine(frame, matrix, (width, height), borderMode=cv2.BORDER_REPLICATE)
+
+
 def apply_zoom(frame, zoom):
     if zoom <= 1.0:
         return frame
@@ -73,6 +81,7 @@ class CameraWorker(QThread):
         super().__init__(parent)
         self.device_path = device_path
         self.zoom = 1.0
+        self.rotation = 0
         self.show_grid = False
         self.show_crosshair = False
         self.stabilize = False
@@ -121,6 +130,7 @@ class CameraWorker(QThread):
                     self._stabilizer.reset()
                 if self.stabilize:
                     frame = self._stabilizer.stabilize(frame)
+                frame = apply_rotation(frame, self.rotation)
                 frame = apply_zoom(frame, self.zoom)
                 self._handle_pending_recording(cap, frame)
                 self._handle_pending_snapshot(frame)

@@ -44,6 +44,20 @@ any vendor's Windows-only bundled software.
   small frame-to-frame shake (e.g. from a wobbly desk or handheld
   stand) without fighting a deliberate, sustained move of the
   microscope. Off by default — toggle it in the "Stabilization" group
+- Image rotation (0-359°, plus one-click 0/90/180/270° snap buttons) to
+  correct however the camera happens to be mounted
+- Point-to-point measurement: calibrate once by clicking two points of
+  a known real-world distance apart (e.g. along a ruler) and entering
+  that distance, then click any two points on the image to read off
+  the real-world distance between them, drawn directly on the video.
+  Calibration automatically accounts for the digital zoom level active
+  at measurement time versus at calibration time — it does *not*
+  account for changing the camera's own optical zoom or focus
+  distance, which needs a fresh calibration
+- Settings (device, zoom, rotation, overlays, stabilization, unit, save
+  folder, calibration) are remembered between runs, under
+  `$XDG_CONFIG_HOME/usb-microscope-linux/settings.json`
+  (`~/.config/usb-microscope-linux/settings.json` by default)
 
 ## Requirements
 
