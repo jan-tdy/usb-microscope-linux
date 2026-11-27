@@ -30,6 +30,26 @@ def draw_crosshair(frame, color=(0, 0, 255), size=20):
     cv2.line(frame, (cx, cy - size), (cx, cy + size), color, 1)
 
 
+def can_capture(device_path, attempts=5):
+    """Whether this device node actually delivers video frames.
+
+    Some UVC cameras expose a second /dev/videoN node for metadata only
+    (no image data) alongside their real capture node; opening it
+    "succeeds" but every read() fails, so a few read attempts tell them apart.
+    """
+    cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
+    if not cap.isOpened():
+        cap.release()
+        return False
+    ok = False
+    for _ in range(attempts):
+        ok, _ = cap.read()
+        if ok:
+            break
+    cap.release()
+    return ok
+
+
 def to_qimage(frame_bgr):
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     height, width, channels = rgb.shape

@@ -3,7 +3,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from microscope.v4l2_controls import _parse_list_ctrls  # noqa: E402
+from microscope.v4l2_controls import _parse_list_ctrls, _parse_list_devices  # noqa: E402
+
+LIST_DEVICES_OUTPUT = """\
+UGREEN Camera: UGREEN Camera (usb-0000:00:14.0-2.3):
+\t/dev/video0
+\t/dev/video1
+\t/dev/media0
+
+USB2.0 UVC PC Camera: USB2.0 UV (usb-0000:00:14.0-7):
+\t/dev/video2
+\t/dev/video3
+\t/dev/media1
+
+"""
 
 SAMPLE_OUTPUT = """\
                      brightness 0x00980900 (int)    : min=0 max=255 step=1 default=128 value=128
@@ -47,3 +60,13 @@ def test_finds_zoom_and_led_controls():
 
 def test_empty_output_returns_no_controls():
     assert _parse_list_ctrls("") == []
+
+
+def test_parses_list_devices_groups_nodes_by_camera():
+    mapping = _parse_list_devices(LIST_DEVICES_OUTPUT)
+    assert mapping["/dev/video0"] == "UGREEN Camera"
+    assert mapping["/dev/video1"] == "UGREEN Camera"
+    assert mapping["/dev/video2"] == "USB2.0 UVC PC Camera"
+    assert mapping["/dev/video3"] == "USB2.0 UVC PC Camera"
+    assert "/dev/media0" not in mapping
+    assert "/dev/media1" not in mapping
