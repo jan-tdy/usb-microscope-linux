@@ -2,6 +2,8 @@ import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
+from .stabilizer import VibrationStabilizer
+
 
 def apply_zoom(frame, zoom):
     if zoom <= 1.0:
@@ -72,15 +74,23 @@ class CameraWorker(QThread):
         self.zoom = 1.0
         self.show_grid = False
         self.show_crosshair = False
+        self.stabilize = False
         self._running = False
         self._writer = None
         self._record_path = None
         self._pending_record_start = None
         self._pending_record_stop = False
         self._pending_snapshot_path = None
+        self._pending_stabilizer_reset = False
+        self._stabilizer = VibrationStabilizer()
 
     def request_snapshot(self, path):
         self._pending_snapshot_path = path
+
+    def set_stabilize(self, enabled):
+        self.stabilize = enabled
+        if enabled:
+            self._pending_stabilizer_reset = True
 
     def request_recording_start(self, path):
         self._pending_record_start = path
@@ -103,6 +113,11 @@ class CameraWorker(QThread):
                 if not ok:
                     self.error.emit(f"Lost signal from {self.device_path}")
                     break
+                if self._pending_stabilizer_reset:
+                    self._pending_stabilizer_reset = False
+                    self._stabilizer.reset()
+                if self.stabilize:
+                    frame = self._stabilizer.stabilize(frame)
                 frame = apply_zoom(frame, self.zoom)
                 self._handle_pending_recording(cap, frame)
                 self._handle_pending_snapshot(frame)

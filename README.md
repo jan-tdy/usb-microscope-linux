@@ -28,6 +28,10 @@ any vendor's Windows-only bundled software.
   folder (defaults to `~/Pictures/USBMicroscope`)
 - Crosshair and grid overlays for quick visual alignment while looking
   at a specimen
+- Vibration compensation: an optional digital stabilizer that cancels
+  small frame-to-frame shake (e.g. from a wobbly desk or handheld
+  stand) without fighting a deliberate, sustained move of the
+  microscope. Off by default — toggle it in the "Stabilization" group
 
 ## Requirements
 
