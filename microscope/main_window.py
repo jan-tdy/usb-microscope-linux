@@ -84,6 +84,18 @@ class MainWindow(QMainWindow):
         overlay_layout.addWidget(self.grid_check)
         side.addWidget(overlay_box)
 
+        stabilize_box = QGroupBox("Stabilization")
+        stabilize_layout = QVBoxLayout(stabilize_box)
+        self.stabilize_check = QCheckBox("Vibration compensation")
+        self.stabilize_check.setToolTip(
+            "Digitally cancels small shake/jitter frame-to-frame (e.g. from a\n"
+            "desk or handheld stand). Doesn't fight a deliberate, sustained\n"
+            "move of the microscope, and costs some CPU per frame."
+        )
+        self.stabilize_check.toggled.connect(self._on_stabilize_toggled)
+        stabilize_layout.addWidget(self.stabilize_check)
+        side.addWidget(stabilize_box)
+
         self.hw_controls_container = QVBoxLayout()
         side.addLayout(self.hw_controls_container)
 
@@ -144,6 +156,7 @@ class MainWindow(QMainWindow):
         self.worker.zoom = self.zoom_slider.value() / 10.0
         self.worker.show_grid = self.grid_check.isChecked()
         self.worker.show_crosshair = self.crosshair_check.isChecked()
+        self.worker.stabilize = self.stabilize_check.isChecked()
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.error.connect(self._on_worker_error)
         self.worker.snapshot_saved.connect(self._on_snapshot_saved)
@@ -198,6 +211,10 @@ class MainWindow(QMainWindow):
     def _on_grid_toggled(self, checked):
         if self.worker is not None:
             self.worker.show_grid = checked
+
+    def _on_stabilize_toggled(self, checked):
+        if self.worker is not None:
+            self.worker.set_stabilize(checked)
 
     # -- hardware (v4l2) controls --------------------------------------------- #
 
