@@ -43,14 +43,18 @@ class VibrationStabilizer:
         self._history.append(self._trajectory.copy())
 
         smoothed = np.mean(self._history, axis=0)
+        # trajectory is the raw, uncorrected cumulative drift of this frame's
+        # content relative to the first frame; diff is exactly how far this
+        # frame needs to be shifted to land on the smoothed path instead —
+        # dx/dy/da (this frame's own incremental motion) must NOT be added
+        # again on top, or the correction doubles back and amplifies the
+        # jitter it was meant to cancel.
         diff = smoothed - self._trajectory
         diff[0] = float(np.clip(diff[0], -self.max_shift, self.max_shift))
         diff[1] = float(np.clip(diff[1], -self.max_shift, self.max_shift))
         diff[2] = float(np.clip(diff[2], -self.max_angle, self.max_angle))
 
-        corrected_dx = dx + diff[0]
-        corrected_dy = dy + diff[1]
-        corrected_da = da + diff[2]
+        corrected_dx, corrected_dy, corrected_da = diff[0], diff[1], diff[2]
 
         cos_a, sin_a = np.cos(corrected_da), np.sin(corrected_da)
         transform = np.array(

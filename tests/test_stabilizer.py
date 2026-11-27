@@ -58,6 +58,35 @@ def test_reset_clears_internal_state():
     assert np.array_equal(stabilizer._trajectory, np.zeros(3))
 
 
+def test_stabilize_reduces_jitter_amplitude():
+    # Regression test: an earlier version added this frame's own raw motion
+    # back on top of the trajectory correction, which *amplified* jitter
+    # instead of cancelling it. Feed a static scene with pure back-and-forth
+    # jitter (no net drift) through the stabilizer and check the residual
+    # frame-to-frame motion of the output is clearly smaller than the input's.
+    base = cv2.cvtColor(_make_pattern(), cv2.COLOR_GRAY2BGR)
+    rng = np.random.default_rng(0)
+    jitter = rng.normal(0, 4.0, size=40)
+    jitter -= jitter.mean()
+
+    frames = []
+    for shift in jitter:
+        matrix = np.array([[1, 0, shift], [0, 1, 0]], dtype=np.float32)
+        frames.append(cv2.warpAffine(base, matrix, (base.shape[1], base.shape[0])))
+
+    stabilizer = VibrationStabilizer()
+    outputs = [stabilizer.stabilize(f) for f in frames]
+
+    def residual_std(sequence):
+        grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in sequence]
+        deltas = [
+            VibrationStabilizer._estimate_motion(a, b)[0] for a, b in zip(grays[:-1], grays[1:])
+        ]
+        return float(np.std(deltas))
+
+    assert residual_std(outputs) < residual_std(frames) * 0.5
+
+
 def test_stabilize_output_matches_input_shape():
     stabilizer = VibrationStabilizer()
     base = _make_pattern()
