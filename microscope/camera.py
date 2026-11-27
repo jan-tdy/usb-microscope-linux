@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
@@ -52,24 +55,47 @@ def draw_crosshair(frame, color=(0, 0, 255), size=20):
     cv2.line(frame, (cx, cy - size), (cx, cy + size), color, 1)
 
 
-def can_capture(device_path, attempts=5):
-    """Whether this device node actually delivers video frames.
-
-    Some UVC cameras expose a second /dev/videoN node for metadata only
-    (no image data) alongside their real capture node; opening it
-    "succeeds" but every read() fails, so a few read attempts tell them apart.
-    """
-    cap = cv2.VideoCapture(device_path, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        cap.release()
-        return False
-    ok = False
+_CAPTURE_PROBE_SCRIPT = """
+import sys
+import cv2
+path = sys.argv[1]
+attempts = int(sys.argv[2])
+cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+ok = False
+if cap.isOpened():
     for _ in range(attempts):
         ok, _ = cap.read()
         if ok:
             break
-    cap.release()
-    return ok
+cap.release()
+sys.exit(0 if ok else 1)
+"""
+
+
+def can_capture(device_path, attempts=5, timeout=5.0):
+    """Whether this device node actually delivers video frames.
+
+    Some UVC cameras expose a second /dev/videoN node for metadata only
+    (no image data) alongside their real capture node; opening it
+    "succeeds" but every read() fails, so a few read attempts tell them
+    apart. But on some camera/driver combinations a real capture node that
+    simply isn't producing frames makes OpenCV's V4L2 backend block on
+    read() for a long time (its own internal timeout, not ours) instead of
+    failing fast — seen in practice as ~10s per read attempt, so 5 of them
+    stacked up across a few candidate devices turned "refresh the device
+    list" into a multi-minute freeze. Running the actual probe in a
+    subprocess lets us put a hard wall-clock cap on it and kill it outright
+    if that's exceeded, rather than being at the mercy of OpenCV's own.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", _CAPTURE_PROBE_SCRIPT, device_path, str(attempts)],
+            timeout=timeout,
+            capture_output=True,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
 
 
 def to_qimage(frame_bgr):
