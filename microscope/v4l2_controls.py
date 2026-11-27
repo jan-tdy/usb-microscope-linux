@@ -13,6 +13,45 @@ def is_available():
     return shutil.which("v4l2-ctl") is not None
 
 
+def _parse_list_devices(output):
+    """Map /dev/videoN -> the camera's card name, from `v4l2-ctl --list-devices`.
+
+    Its output groups device nodes under a header line per physical camera
+    (e.g. "USB2.0 UVC PC Camera: USB2.0 UV (usb-0000:00:14.0-7):"), followed
+    by that camera's indented /dev/videoN and /dev/mediaN nodes.
+    """
+    mapping = {}
+    current_name = None
+    for line in output.splitlines():
+        if not line.strip():
+            current_name = None
+            continue
+        if line.startswith(("\t", " ")):
+            path = line.strip()
+            if current_name and path.startswith("/dev/video"):
+                mapping[path] = current_name
+        else:
+            current_name = line.split(":", 1)[0].strip()
+    return mapping
+
+
+def list_devices():
+    if not is_available():
+        return {}
+    try:
+        result = subprocess.run(
+            ["v4l2-ctl", "--list-devices"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    return _parse_list_devices(result.stdout)
+
+
 def _parse_list_ctrls(output):
     controls = []
     for line in output.splitlines():

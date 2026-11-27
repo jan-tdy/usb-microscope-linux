@@ -10,7 +10,11 @@ any vendor's Windows-only bundled software.
 ## Features
 
 - Live video stream from any detected `/dev/video*` device, with a
-  device dropdown and refresh button
+  device dropdown and refresh button. The dropdown shows each camera's
+  name (e.g. "USB2.0 UVC PC Camera (/dev/video2)") and skips device
+  nodes that don't actually deliver a video frame — some UVC cameras
+  expose a second metadata-only node alongside their real one, which
+  this app no longer makes you guess between
 - Digital zoom (software crop + upscale), always available regardless
   of what the camera itself exposes
 - Auto-detected hardware controls: if the connected camera exposes an

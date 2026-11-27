@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 from . import v4l2_controls
-from .camera import CameraWorker
+from .camera import CameraWorker, can_capture
 from .devices import list_video_devices
 
 CAPTURE_DIR = os.path.join(os.path.expanduser("~"), "Pictures", "USBMicroscope")
@@ -115,11 +115,18 @@ class MainWindow(QMainWindow):
 
     def _refresh_devices(self):
         self.device_combo.clear()
-        devices = list_video_devices()
-        for path in devices:
-            self.device_combo.addItem(path, path)
-        if not devices:
-            self.statusBar().showMessage("No /dev/video* devices found")
+        names = v4l2_controls.list_devices()
+        usable = []
+        for path in list_video_devices():
+            # Skip probing the device the running worker already has open —
+            # opening it a second time here would fight it for the camera.
+            if (self.worker is not None and path == self._device_path) or can_capture(path):
+                usable.append(path)
+        for path in usable:
+            label = f"{names[path]} ({path})" if path in names else path
+            self.device_combo.addItem(label, path)
+        if not usable:
+            self.statusBar().showMessage("No usable /dev/video* capture devices found")
 
     def _toggle_stream(self):
         if self.worker is None:
